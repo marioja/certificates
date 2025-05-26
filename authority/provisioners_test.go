@@ -19,8 +19,10 @@ import (
 	"github.com/smallstep/assert"
 	"github.com/smallstep/certificates/api/render"
 	"github.com/smallstep/certificates/authority/admin"
+	adminnosql "github.com/smallstep/certificates/authority/admin/db/nosql"
 	"github.com/smallstep/certificates/authority/provisioner"
 	"github.com/smallstep/certificates/db"
+	"github.com/smallstep/nosql"
 )
 
 func TestGetEncryptedKey(t *testing.T) {
@@ -898,6 +900,48 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 				err:  nil,
 			}
 		},
+		"ok/jwk-provisioner-with-real-badger-db": func(t *testing.T) test {
+			auth := testAuthority(t)
+
+			// Set up a real Badger database
+			dir := t.TempDir()
+			db, err := nosql.New("badgerv2", dir)
+			require.NoError(t, err)
+
+			// Create admin database with real Badger backend
+			adminDB, err := adminnosql.New(db, admin.DefaultAuthorityID)
+			require.NoError(t, err)
+
+			auth.adminDB = adminDB
+
+			prov := &linkedca.Provisioner{
+				Type: linkedca.Provisioner_JWK,
+				Name: "test-jwk-provisioner",
+				Details: &linkedca.ProvisionerDetails{
+					Data: &linkedca.ProvisionerDetails_JWK{
+						JWK: &linkedca.JWKProvisioner{
+							PublicKey:           []byte(`{"kty":"EC","crv":"P-256","x":"MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4","y":"4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM","use":"sig","kid":"1"}`),
+							EncryptedPrivateKey: []byte("encrypted-key"),
+						},
+					},
+				},
+				Claims: &linkedca.Claims{
+					X509: &linkedca.X509Claims{
+						Enabled: true,
+						Durations: &linkedca.Durations{
+							Default: "24h",
+							Min:     "1h",
+							Max:     "720h",
+						},
+					},
+				},
+			}
+			return test{
+				auth: auth,
+				prov: prov,
+				err:  nil,
+			}
+		},
 	}
 
 	for name, run := range tests {
@@ -925,6 +969,24 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 
 					// Verify the provisioner ID was set by the database
 					assert.NotEquals(t, "", tc.prov.Id, "provisioner ID should be set after storage")
+
+					// For the real Badger database test, also verify the provisioner was stored in the database
+					// Skip this check for mock databases since they don't implement GetProvisioner consistently
+					if tc.auth.adminDB != nil {
+						if _, isMock := tc.auth.adminDB.(*admin.MockDB); !isMock {
+							// Try to retrieve the provisioner from the database using its ID
+							dbProv, err := tc.auth.adminDB.GetProvisioner(context.Background(), tc.prov.Id)
+							if assert.NoError(t, err, "should be able to retrieve provisioner from real database") {
+								// Verify database content matches what we stored
+								assert.Equals(t, tc.prov.Id, dbProv.Id)
+								assert.Equals(t, tc.prov.Name, dbProv.Name)
+								assert.Equals(t, tc.prov.Type, dbProv.Type)
+								assert.Equals(t, tc.prov.Claims, dbProv.Claims)
+								// Note: Details comparison would require unmarshaling,
+								// but the above fields provide good coverage
+							}
+						}
+					}
 				}
 			}
 		})
