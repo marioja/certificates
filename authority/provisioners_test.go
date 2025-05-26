@@ -5,7 +5,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -978,6 +981,172 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 
 			prov := &linkedca.Provisioner{
 				Name: "test-jwk-programmatic",
+				Type: linkedca.Provisioner_JWK,
+				Details: &linkedca.ProvisionerDetails{
+					Data: &linkedca.ProvisionerDetails_JWK{
+						JWK: &linkedca.JWKProvisioner{
+							PublicKey:           jwkPubBytes,
+							EncryptedPrivateKey: []byte(jwePrivStr),
+						},
+					},
+				},
+				Claims: &linkedca.Claims{
+					X509: &linkedca.X509Claims{
+						Enabled: true,
+						Durations: &linkedca.Durations{
+							Default: "24h",
+							Min:     "1h",
+							Max:     "720h",
+						},
+					},
+				},
+			}
+			return test{
+				auth: auth,
+				prov: prov,
+				err:  nil,
+			}
+		},
+		// Test that uses the existing Badger database and adds a new admin provider
+		// This test demonstrates:
+		// 1. Opening an existing Badger database with 4 admin providers
+		// 2. Adding a new admin provider programmatically
+		// 3. Verifying the total count increases to 5 admins
+		// 4. Confirming existing admins (step, step2, step3, step4) are preserved
+		"ok/jwk-provisioner-with-existing-badger-db-and-new-admin": func(t *testing.T) test {
+			auth := testAuthority(t)
+
+			// Create a temporary directory for the database copy
+			tempDir := t.TempDir()
+			tempDbPath := filepath.Join(tempDir, "db.4admins")
+
+			// Copy the existing database to the temporary directory using filepath.WalkDir
+			sourceDbPath := "testdata/db/db.4admins"
+			err := filepath.WalkDir(sourceDbPath, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+
+				// Calculate the destination path
+				relPath, err := filepath.Rel(sourceDbPath, path)
+				if err != nil {
+					return err
+				}
+				destPath := filepath.Join(tempDbPath, relPath)
+
+				if d.IsDir() {
+					info, err := d.Info()
+					if err != nil {
+						return err
+					}
+					return os.MkdirAll(destPath, info.Mode())
+				}
+
+				// Copy file
+				src, err := os.Open(path)
+				if err != nil {
+					return err
+				}
+				defer src.Close()
+
+				info, err := src.Stat()
+				if err != nil {
+					return err
+				}
+
+				dst, err := os.Create(destPath)
+				if err != nil {
+					return err
+				}
+				defer dst.Close()
+
+				if _, err = io.Copy(dst, src); err != nil {
+					return err
+				}
+
+				// Preserve file permissions
+				return os.Chmod(destPath, info.Mode())
+			})
+			require.NoError(t, err, "Failed to copy database to temporary directory")
+
+			// Use the copied Badger database
+			db, err := nosql.New("badgerv2", tempDbPath)
+			require.NoError(t, err)
+
+			// Create admin database with copied Badger backend
+			adminDB, err := adminnosql.New(db, admin.DefaultAuthorityID)
+			require.NoError(t, err)
+
+			auth.adminDB = adminDB
+
+			// First, verify the existing database has admins and log what we find
+			ctx := context.Background()
+			existingAdmins, err := adminDB.GetAdmins(ctx)
+			require.NoError(t, err)
+
+			// Log what we actually find in the database for debugging
+			t.Logf("Found %d existing admins:", len(existingAdmins))
+			for i, adm := range existingAdmins {
+				t.Logf("  Admin %d: ID=%s, Subject=%s, Type=%s", i+1, adm.Id, adm.Subject, adm.Type.String())
+			}
+
+			// Store the initial count to verify it increases by 1
+			initialAdminCount := len(existingAdmins)
+
+			// Verify the expected admin subjects are present (based on actual database content)
+			expectedSubjects := []string{"step", "step2", "step3", "step4"}
+			foundSubjects := make(map[string]bool)
+			for _, adm := range existingAdmins {
+				foundSubjects[adm.Subject] = true
+			}
+
+			for _, expectedSubject := range expectedSubjects {
+				require.True(t, foundSubjects[expectedSubject], "Expected to find admin with subject: %s", expectedSubject)
+			}
+
+			// Create a new admin provider programmatically
+			newAdmin := &linkedca.Admin{
+				AuthorityId:   admin.DefaultAuthorityID,
+				ProvisionerId: "new-test-provisioner-id",
+				Subject:       "newadmin",
+				Type:          linkedca.Admin_ADMIN,
+			}
+
+			// Add the new admin to the database
+			err = adminDB.CreateAdmin(ctx, newAdmin)
+			require.NoError(t, err)
+
+			// Verify the database now contains the initial count + 1 admins
+			allAdmins, err := adminDB.GetAdmins(ctx)
+			require.NoError(t, err)
+			require.Equal(t, initialAdminCount+1, len(allAdmins), "Expected admin count to increase by 1 after adding new admin")
+
+			// Verify the new admin was added
+			foundNewAdmin := false
+			for _, adm := range allAdmins {
+				if adm.Subject == "newadmin" {
+					foundNewAdmin = true
+					assert.Equals(t, adm.AuthorityId, admin.DefaultAuthorityID)
+					assert.Equals(t, adm.ProvisionerId, "new-test-provisioner-id")
+					assert.Equals(t, adm.Type, linkedca.Admin_ADMIN)
+					break
+				}
+			}
+			require.True(t, foundNewAdmin, "New admin should be found in database")
+
+			// Generate JWK provisioner programmatically using jose library
+			password := "test-password-new"
+			jwk, jwe, err := jose.GenerateDefaultKeyPair([]byte(password))
+			require.NoError(t, err)
+
+			jwkPubBytes, err := jwk.MarshalJSON()
+			require.NoError(t, err)
+
+			jwePrivStr, err := jwe.CompactSerialize()
+			require.NoError(t, err)
+
+			prov := &linkedca.Provisioner{
+				Name: "test-jwk-with-existing-db",
 				Type: linkedca.Provisioner_JWK,
 				Details: &linkedca.ProvisionerDetails{
 					Data: &linkedca.ProvisionerDetails_JWK{
