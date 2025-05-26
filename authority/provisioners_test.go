@@ -942,6 +942,68 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 				err:  nil,
 			}
 		},
+		// Test that creates a JWK provisioner using programmatic key generation with a real Badger database
+		// Key Features:
+		// 1. Uses Real Badger Database: Creates a temporary directory and initializes a real Badger v2 database
+		// 2. Programmatic Key Generation: Uses jose.GenerateDefaultKeyPair() to generate actual cryptographic keys instead of hardcoded values
+		// 3. Dynamic Provisioner Creation: Creates the JWK provisioner with real generated keys:
+		//    - Generates an EC P-256 key pair with a password
+		//    - Marshals the public key to JSON
+		//    - Serializes the encrypted private key as JWE
+		// 4. Real Database Integration: Connects the authority to a real admin database using adminnosql.New()
+		"ok/jwk-provisioner-with-programmatic-creation": func(t *testing.T) test {
+			auth := testAuthority(t)
+
+			// Set up a real Badger database
+			dir := t.TempDir()
+			db, err := nosql.New("badgerv2", dir)
+			require.NoError(t, err)
+
+			// Create admin database with real Badger backend
+			adminDB, err := adminnosql.New(db, admin.DefaultAuthorityID)
+			require.NoError(t, err)
+
+			auth.adminDB = adminDB
+
+			// Generate JWK provisioner programmatically using jose library
+			password := "test-password"
+			jwk, jwe, err := jose.GenerateDefaultKeyPair([]byte(password))
+			require.NoError(t, err)
+
+			jwkPubBytes, err := jwk.MarshalJSON()
+			require.NoError(t, err)
+
+			jwePrivStr, err := jwe.CompactSerialize()
+			require.NoError(t, err)
+
+			prov := &linkedca.Provisioner{
+				Name: "test-jwk-programmatic",
+				Type: linkedca.Provisioner_JWK,
+				Details: &linkedca.ProvisionerDetails{
+					Data: &linkedca.ProvisionerDetails_JWK{
+						JWK: &linkedca.JWKProvisioner{
+							PublicKey:           jwkPubBytes,
+							EncryptedPrivateKey: []byte(jwePrivStr),
+						},
+					},
+				},
+				Claims: &linkedca.Claims{
+					X509: &linkedca.X509Claims{
+						Enabled: true,
+						Durations: &linkedca.Durations{
+							Default: "24h",
+							Min:     "1h",
+							Max:     "720h",
+						},
+					},
+				},
+			}
+			return test{
+				auth: auth,
+				prov: prov,
+				err:  nil,
+			}
+		},
 	}
 
 	for name, run := range tests {
