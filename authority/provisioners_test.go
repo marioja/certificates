@@ -1186,6 +1186,14 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 			require.NoError(t, err)
 			t.Logf("Found %d total provisioners after adding new admin:", len(allProvisioners))
 			for i, prov := range allProvisioners {
+				if prov.Name == "test-jwk-new-provisioner" {
+					foundNewProvisioner = true
+					assert.Equals(t, prov.Type, linkedca.Provisioner_JWK)
+					assert.Equals(t, prov.Id, newProvisioner.Id)
+					assert.Equals(t, prov.Claims, newProvisioner.Claims)
+					assert.Equals(t, prov.Details.GetJWK().PublicKey, newProvisioner.Details.GetJWK().PublicKey)
+					assert.Equals(t, prov.Details.GetJWK().EncryptedPrivateKey, newProvisioner.Details.GetJWK().EncryptedPrivateKey)
+				}
 				t.Logf("  Provisioner %d: ID=%s, Name=%s, Type=%s", i+1, prov.Id, prov.Name, prov.Type.String())
 			}
 
