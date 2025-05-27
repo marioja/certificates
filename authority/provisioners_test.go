@@ -1079,19 +1079,29 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 
 			auth.adminDB = adminDB
 
-			// First, verify the existing database has admins and log what we find
+			// First, verify the existing database has provisioners and admins and log what we find
 			ctx := context.Background()
+
+			// Get and log existing provisioners
+			existingProvisioners, err := adminDB.GetProvisioners(ctx)
+			require.NoError(t, err)
+			t.Logf("Found %d existing provisioners:", len(existingProvisioners))
+			for i, prov := range existingProvisioners {
+				t.Logf("  Provisioner %d: ID=%s, Name=%s, Type=%s", i+1, prov.Id, prov.Name, prov.Type.String())
+			}
+
 			existingAdmins, err := adminDB.GetAdmins(ctx)
 			require.NoError(t, err)
 
 			// Log what we actually find in the database for debugging
 			t.Logf("Found %d existing admins:", len(existingAdmins))
 			for i, adm := range existingAdmins {
-				t.Logf("  Admin %d: ID=%s, Subject=%s, Type=%s", i+1, adm.Id, adm.Subject, adm.Type.String())
+				t.Logf("  Admin %d: PID=%s, ID=%s, Subject=%s, Type=%s", i+1, adm.ProvisionerId, adm.Id, adm.Subject, adm.Type.String())
 			}
 
-			// Store the initial count to verify it increases by 1
+			// Store the initial counts to verify they increase by 1
 			initialAdminCount := len(existingAdmins)
+			initialProvisionerCount := len(existingProvisioners)
 
 			// Verify the expected admin subjects are present (based on actual database content)
 			expectedSubjects := []string{"step", "step2", "step3", "step4"}
@@ -1104,37 +1114,7 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 				require.True(t, foundSubjects[expectedSubject], "Expected to find admin with subject: %s", expectedSubject)
 			}
 
-			// Create a new admin provider programmatically
-			newAdmin := &linkedca.Admin{
-				AuthorityId:   admin.DefaultAuthorityID,
-				ProvisionerId: "new-test-provisioner-id",
-				Subject:       "newadmin",
-				Type:          linkedca.Admin_ADMIN,
-			}
-
-			// Add the new admin to the database
-			err = adminDB.CreateAdmin(ctx, newAdmin)
-			require.NoError(t, err)
-
-			// Verify the database now contains the initial count + 1 admins
-			allAdmins, err := adminDB.GetAdmins(ctx)
-			require.NoError(t, err)
-			require.Equal(t, initialAdminCount+1, len(allAdmins), "Expected admin count to increase by 1 after adding new admin")
-
-			// Verify the new admin was added
-			foundNewAdmin := false
-			for _, adm := range allAdmins {
-				if adm.Subject == "newadmin" {
-					foundNewAdmin = true
-					assert.Equals(t, adm.AuthorityId, admin.DefaultAuthorityID)
-					assert.Equals(t, adm.ProvisionerId, "new-test-provisioner-id")
-					assert.Equals(t, adm.Type, linkedca.Admin_ADMIN)
-					break
-				}
-			}
-			require.True(t, foundNewAdmin, "New admin should be found in database")
-
-			// Generate JWK provisioner programmatically using jose library
+			// Generate and create a new JWK provisioner programmatically using jose library
 			password := "test-password-new"
 			jwk, jwe, err := jose.GenerateDefaultKeyPair([]byte(password))
 			require.NoError(t, err)
@@ -1145,8 +1125,8 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 			jwePrivStr, err := jwe.CompactSerialize()
 			require.NoError(t, err)
 
-			prov := &linkedca.Provisioner{
-				Name: "test-jwk-with-existing-db",
+			newProvisioner := &linkedca.Provisioner{
+				Name: "test-jwk-new-provisioner",
 				Type: linkedca.Provisioner_JWK,
 				Details: &linkedca.ProvisionerDetails{
 					Data: &linkedca.ProvisionerDetails_JWK{
@@ -1167,6 +1147,70 @@ func TestAuthority_StoreProvisioner(t *testing.T) {
 					},
 				},
 			}
+
+			// Add the new provisioner to the database
+			err = adminDB.CreateProvisioner(ctx, newProvisioner)
+			require.NoError(t, err)
+
+			// Verify the database now contains the initial count + 1 provisioners
+			allProvisionersAfter, err := adminDB.GetProvisioners(ctx)
+			require.NoError(t, err)
+			require.Equal(t, initialProvisionerCount+1, len(allProvisionersAfter), "Expected provisioner count to increase by 1 after adding new provisioner")
+
+			// Verify the new provisioner was added
+			t.Logf("Found %d total provisioners after adding new provisioner:", len(allProvisionersAfter))
+			foundNewProvisioner := false
+			for i, prov := range allProvisionersAfter {
+				if prov.Name == "test-jwk-new-provisioner" {
+					foundNewProvisioner = true
+					assert.Equals(t, prov.Type, linkedca.Provisioner_JWK)
+					//break
+				}
+				t.Logf("  Provisioner %d: ID=%s, Name=%s, Type=%s", i+1, prov.Id, prov.Name, prov.Type.String())
+			}
+			require.True(t, foundNewProvisioner, "New provisioner should be found in database")
+
+			// Create a new admin provider programmatically after creating the provisioner
+			newAdmin := &linkedca.Admin{
+				AuthorityId:   admin.DefaultAuthorityID,
+				ProvisionerId: newProvisioner.Id, // Reference the newly created provisioner
+				Subject:       "newadmin",
+				Type:          linkedca.Admin_SUPER_ADMIN,
+			}
+
+			// Add the new admin to the database
+			err = adminDB.CreateAdmin(ctx, newAdmin)
+			require.NoError(t, err)
+
+			allProvisioners, err := adminDB.GetProvisioners(ctx)
+			require.NoError(t, err)
+			t.Logf("Found %d total provisioners after adding new admin:", len(allProvisioners))
+			for i, prov := range allProvisioners {
+				t.Logf("  Provisioner %d: ID=%s, Name=%s, Type=%s", i+1, prov.Id, prov.Name, prov.Type.String())
+			}
+
+			// Verify the database now contains the initial count + 1 admins
+			allAdmins, err := adminDB.GetAdmins(ctx)
+			require.NoError(t, err)
+			require.Equal(t, initialAdminCount+1, len(allAdmins), "Expected admin count to increase by 1 after adding new admin")
+
+			// Verify the new admin was added
+			t.Logf("Found %d total admins after adding new admin:", len(allAdmins))
+			foundNewAdmin := false
+			for i, adm := range allAdmins {
+				if adm.Subject == "newadmin" {
+					foundNewAdmin = true
+					assert.Equals(t, adm.AuthorityId, admin.DefaultAuthorityID)
+					assert.Equals(t, adm.ProvisionerId, newProvisioner.Id)
+					assert.Equals(t, adm.Type, linkedca.Admin_SUPER_ADMIN)
+					//break
+				}
+				t.Logf("  Admin %d: PID=%s, ID=%s, Subject=%s, Type=%s", i+1, adm.ProvisionerId, adm.Id, adm.Subject, adm.Type.String())
+			}
+			require.True(t, foundNewAdmin, "New admin should be found in database")
+
+			// Return the newly created provisioner for the test framework
+			prov := newProvisioner
 			return test{
 				auth: auth,
 				prov: prov,
